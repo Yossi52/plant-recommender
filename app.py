@@ -522,4 +522,34 @@ def render_results(include, exclude):
             st.pyplot(fig, width="stretch")
 
             st.caption(
-                "값이 클수록 해당
+                "값이 클수록 해당 조건의 선호 패턴이 이번 추천 순위와 더 비슷함을 의미합니다 "
+                "(= 그 조건이 결과에 더 크게 반영됨). 매 추천마다 새로 계산됩니다."
+            )
+
+    with st.expander("📋 상세 결과 표"):
+        show_cols = ["식물명", "추천점수", "관리요구도", "독성_여부(1=있음)"]
+        st.dataframe(
+            df[show_cols].rename(columns={"추천점수": "추천점수(0~1)", "독성_여부(1=있음)": "독성여부"}),
+            width="stretch",
+        )
+
+
+# ══════════════════════════════════════════════════════════
+# 7. 메인 영역
+# ══════════════════════════════════════════════════════════
+include, exclude, _selected_categories = build_conditions()
+
+if submitted:
+    if not include and not exclude:
+        st.info("위에서 환경 조건을 하나 이상 선택한 뒤 '식물 추천 받기'를 눌러주세요. "
+                "조건을 입력하지 않으면 전체 평균 기준 추천을 보여줍니다.")
+    render_results(include, exclude)
+else:
+    st.markdown(
+        """
+        ### 👆 위에서 우리 집 환경을 선택하고 '식물 추천 받기'를 눌러주세요
+        - 광도, 두는 위치, 온도, 습도, 관리 난이도 등 일부만 선택해도 추천이 가능합니다.
+        - 반려동물/아이가 있다면 '독성 식물 제외'를 체크하세요.
+        - 꽃가루 알러지가 있다면 해당 계절을 선택하면 그 계절에 꽃 피는 식물을 제외합니다.
+        """
+    )
