@@ -309,9 +309,39 @@ def flower_label(row):
     return ", ".join(labels) if labels else "없음"
 
 
+def _search_commons_image(query: str):
+    """Wikimedia Commons 파일 검색에서 대표 썸네일 URL을 가져온다."""
+    try:
+        resp = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": f"{query} filetype:bitmap",
+                "gsrnamespace": 6,  # File 네임스페이스
+                "gsrlimit": 1,
+                "prop": "imageinfo",
+                "iiprop": "url",
+                "iiurlwidth": 300,
+                "format": "json",
+            },
+            headers={"User-Agent": "plant-recommender-dashboard/1.0"},
+            timeout=3,
+        )
+        pages = resp.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            for info in page.get("imageinfo", []):
+                thumb = info.get("thumburl") or info.get("url")
+                if thumb:
+                    return thumb
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def get_plant_image(name_ko: str, name_en: str = ""):
-    """위키백과(한국어 → 영어)에서 식물명으로 검색해 대표 이미지 URL을 가져온다."""
+    """위키백과(한국어 → 영어) → Wikimedia Commons 순으로 식물명 대표 이미지를 검색한다."""
     candidates = [("ko", name_ko)]
     if name_en and isinstance(name_en, str) and name_en.strip():
         candidates.append(("en", name_en.strip()))
@@ -339,6 +369,15 @@ def get_plant_image(name_ko: str, name_en: str = ""):
                     return thumb
         except Exception:
             continue
+
+    # 위키백과에서 못 찾으면 Wikimedia Commons 파일 검색으로 보완
+    for query in [name_en.strip() if name_en and isinstance(name_en, str) else "", name_ko]:
+        if not query:
+            continue
+        thumb = _search_commons_image(query)
+        if thumb:
+            return thumb
+
     return None
 
 
