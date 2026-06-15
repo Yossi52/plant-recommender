@@ -27,7 +27,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import torch
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -219,7 +221,7 @@ res = load_resources()
 # 2. 추천 함수 (14_recommend.py 로직과 동일)
 # ══════════════════════════════════════════════════════════
 VERIFY_COLS = [
-    "독성_여부(1=있음)", "관리요구도",
+    "독성_여부(1=있음)", "관리요구도", "식물영명",
     "광도_낮음", "광도_중간", "광도_높음",
     "장소_발코니 창측", "장소_발코니 내측", "장소_거실 창측", "장소_거실 내측", "장소_실내 어두운 곳",
     "꽃피는계절_봄", "꽃피는계절_여름", "꽃피는계절_가을", "꽃피는계절_겨울",
@@ -307,6 +309,39 @@ def flower_label(row):
     return ", ".join(labels) if labels else "없음"
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def get_plant_image(name_ko: str, name_en: str = ""):
+    """위키백과(한국어 → 영어)에서 식물명으로 검색해 대표 이미지 URL을 가져온다."""
+    candidates = [("ko", name_ko)]
+    if name_en and isinstance(name_en, str) and name_en.strip():
+        candidates.append(("en", name_en.strip()))
+        candidates.append(("ko", name_en.strip()))
+
+    for lang, title in candidates:
+        try:
+            resp = requests.get(
+                f"https://{lang}.wikipedia.org/w/api.php",
+                params={
+                    "action": "query",
+                    "titles": title,
+                    "prop": "pageimages",
+                    "format": "json",
+                    "pithumbsize": 300,
+                    "redirects": 1,
+                },
+                headers={"User-Agent": "plant-recommender-dashboard/1.0"},
+                timeout=3,
+            )
+            pages = resp.json().get("query", {}).get("pages", {})
+            for page in pages.values():
+                thumb = page.get("thumbnail", {}).get("source")
+                if thumb:
+                    return thumb
+        except Exception:
+            continue
+    return None
+
+
 # ══════════════════════════════════════════════════════════
 # 3. 헤더
 # ══════════════════════════════════════════════════════════
@@ -323,6 +358,48 @@ st.divider()
 # ══════════════════════════════════════════════════════════
 NONE = "선택 안 함"
 
+# 폼 옵션 목록 (위젯 생성 + 공유 링크 인코딩/디코딩에 공통 사용)
+LIGHT_OPTIONS = [NONE, "낮음 (그늘)", "중간", "높음 (직사광)"]
+PLACE_OPTIONS = [NONE, "발코니 창가", "발코니 안쪽", "거실 창가", "거실 안쪽", "어두운 실내"]
+GROW_TEMP_OPTIONS = [NONE, "낮음", "중간", "높음"]
+WINTER_TEMP_OPTIONS = [NONE, "0℃ 이하도 가능", "5℃ 이상", "7℃ 이상", "10℃ 이상", "13℃ 이상 (열대성)"]
+HUMIDITY_OPTIONS = [NONE, "낮음", "중간", "높음"]
+MGMT_OPTIONS = [NONE, "아주 쉬움 (초보)", "쉬움", "보통", "손이 많이 감"]
+ALLERGY_SEASON_OPTIONS = ["봄", "여름", "가을", "겨울"]
+WATER_SEASONS = [("봄", 4), ("여름", 4), ("가을", 4), ("겨울", 3)]
+WATER_SEASON_CODE = {"봄": "sp", "여름": "su", "가을": "fa", "겨울": "wi"}
+
+
+def _qp_idx(key, options_len, default=0):
+    """쿼리 파라미터에서 옵션 인덱스를 읽어온다 (공유 링크 복원용)."""
+    try:
+        v = int(st.query_params.get(key, default))
+        if 0 <= v < options_len:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def _qp_bool(key, default=False):
+    return st.query_params.get(key, "1" if default else "0") == "1"
+
+
+def _qp_list(key, valid_values):
+    raw = st.query_params.get(key, "")
+    return [v for v in raw.split(",") if v in valid_values] if raw else []
+
+
+def _qp_int(key, default, lo, hi):
+    try:
+        v = int(st.query_params.get(key, default))
+        if lo <= v <= hi:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
 with st.form("condition_form"):
     st.subheader("🏡 우리 집 환경 입력")
     st.caption("해당하는 항목만 선택하세요. 비워두면 추천에 영향을 주지 않습니다.")
@@ -331,48 +408,42 @@ with st.form("condition_form"):
 
     with c1:
         st.markdown("**☀️ 광도 / 장소**")
-        light = st.radio("광도", [NONE, "낮음 (그늘)", "중간", "높음 (직사광)"], index=0)
-        place = st.radio(
-            "두는 위치",
-            [NONE, "발코니 창가", "발코니 안쪽", "거실 창가", "거실 안쪽", "어두운 실내"],
-            index=0,
-        )
+        light = st.radio("광도", LIGHT_OPTIONS, index=_qp_idx("l", len(LIGHT_OPTIONS)))
+        place = st.radio("두는 위치", PLACE_OPTIONS, index=_qp_idx("p", len(PLACE_OPTIONS)))
 
     with c2:
         st.markdown("**🌡️ 온도 / 습도**")
-        grow_temp = st.radio("생육 적정 온도", [NONE, "낮음", "중간", "높음"], index=0)
+        grow_temp = st.radio("생육 적정 온도", GROW_TEMP_OPTIONS, index=_qp_idx("gt", len(GROW_TEMP_OPTIONS)))
         winter_temp = st.radio(
             "겨울철 최저 온도",
-            [NONE, "0℃ 이하도 가능", "5℃ 이상", "7℃ 이상", "10℃ 이상", "13℃ 이상 (열대성)"],
-            index=0,
+            WINTER_TEMP_OPTIONS,
+            index=_qp_idx("wt", len(WINTER_TEMP_OPTIONS)),
             help="겨울에 식물이 견뎌야 할 최소 온도 수준입니다.",
         )
-        humidity = st.radio("습도", [NONE, "낮음", "중간", "높음"], index=0)
+        humidity = st.radio("습도", HUMIDITY_OPTIONS, index=_qp_idx("hu", len(HUMIDITY_OPTIONS)))
 
     with c3:
         st.markdown("**🪴 관리 / 추가 조건**")
-        mgmt = st.radio(
-            "관리 난이도",
-            [NONE, "아주 쉬움 (초보)", "쉬움", "보통", "손이 많이 감"],
-            index=0,
-        )
-        no_toxic = st.checkbox("반려동물/아이가 있어요 (독성 식물 제외)")
+        mgmt = st.radio("관리 난이도", MGMT_OPTIONS, index=_qp_idx("mg", len(MGMT_OPTIONS)))
+        no_toxic = st.checkbox("반려동물/아이가 있어요 (독성 식물 제외)", value=_qp_bool("nt"))
         allergy_seasons = st.multiselect(
             "꽃가루 알러지 계절 (해당 계절에 꽃 피는 식물 제외)",
-            ["봄", "여름", "가을", "겨울"],
+            ALLERGY_SEASON_OPTIONS,
+            default=_qp_list("al", ALLERGY_SEASON_OPTIONS),
         )
 
     with st.expander("💧 계절별 물주기 빈도 (선택)"):
         watering = {}
         wcols = st.columns(4)
-        for wc, (season, max_level) in zip(wcols, [("봄", 4), ("여름", 4), ("가을", 4), ("겨울", 3)]):
+        for wc, (season, max_level) in zip(wcols, WATER_SEASONS):
             with wc:
                 opts = [NONE] + [f"{i} (1=적게 ~ {max_level}=자주)" if i == 1 else str(i) for i in range(1, max_level + 1)]
-                watering[season] = st.selectbox(f"{season} 물주기", opts, index=0, key=f"water_{season}")
+                default_idx = _qp_idx(f"w{WATER_SEASON_CODE[season]}", len(opts))
+                watering[season] = st.selectbox(f"{season} 물주기", opts, index=default_idx, key=f"water_{season}")
 
     bottom_l, bottom_r = st.columns([3, 1])
     with bottom_l:
-        top_k = st.slider("추천 개수", 5, 20, 10)
+        top_k = st.slider("추천 개수", 5, 20, _qp_int("k", 10, 5, 20))
     with bottom_r:
         st.write("")
         submitted = st.form_submit_button("🔍 식물 추천 받기", width="stretch")
@@ -479,13 +550,30 @@ def render_results(include, exclude):
                 tags.append("<span class='tag'>무독성</span>")
             tags.append(f"<span class='tag'>🌸 {flower_label(row)}</span>")
 
+            img_url = get_plant_image(row["식물명"], row.get("식물영명", ""))
+            if img_url:
+                img_html = (
+                    f'<img src="{img_url}" alt="{row["식물명"]}" '
+                    'style="width:64px;height:64px;object-fit:cover;border-radius:10px;'
+                    'flex-shrink:0;background:#eef3ea;" />'
+                )
+            else:
+                img_html = (
+                    '<div style="width:64px;height:64px;border-radius:10px;flex-shrink:0;'
+                    'background:#eef3ea;display:flex;align-items:center;justify-content:center;'
+                    'font-size:1.8rem;">🌿</div>'
+                )
+
             st.markdown(
                 f"""
-                <div class="plant-card">
-                    <span class="rank-badge">{rank}</span>
-                    <b style="font-size:1.05rem;">{row['식물명']}</b>
-                    <span class="score-pill" style="float:right;">적합도 {row['추천점수']*100:.1f}%</span>
-                    <div style="margin-top:8px;">{''.join(tags)}</div>
+                <div class="plant-card" style="display:flex; gap:12px; align-items:flex-start;">
+                    {img_html}
+                    <div style="flex:1; min-width:0;">
+                        <span class="rank-badge">{rank}</span>
+                        <b style="font-size:1.05rem;">{row['식물명']}</b>
+                        <span class="score-pill" style="float:right;">적합도 {row['추천점수']*100:.1f}%</span>
+                        <div style="margin-top:8px;">{''.join(tags)}</div>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -535,15 +623,108 @@ def render_results(include, exclude):
 
 
 # ══════════════════════════════════════════════════════════
+# 6-1. 결과 공유 (URL 쿼리 파라미터 인코딩 + 공유 버튼)
+# ══════════════════════════════════════════════════════════
+def _sync_query_params():
+    """현재 선택된 조건을 URL 쿼리 파라미터에 반영한다 (공유 링크 생성용)."""
+    params = {
+        "l": LIGHT_OPTIONS.index(light),
+        "p": PLACE_OPTIONS.index(place),
+        "gt": GROW_TEMP_OPTIONS.index(grow_temp),
+        "wt": WINTER_TEMP_OPTIONS.index(winter_temp),
+        "hu": HUMIDITY_OPTIONS.index(humidity),
+        "mg": MGMT_OPTIONS.index(mgmt),
+        "nt": "1" if no_toxic else "0",
+        "al": ",".join(allergy_seasons),
+        "k": top_k,
+    }
+    for season, code in WATER_SEASON_CODE.items():
+        val = watering[season]
+        if val == NONE:
+            idx = 0
+        elif val.startswith("1 ("):
+            idx = 1
+        else:
+            idx = int(val)
+        params[f"w{code}"] = idx
+
+    st.query_params.clear()
+    st.query_params.update({k: str(v) for k, v in params.items()})
+
+
+def render_share_buttons():
+    """'URL 공유' / '클립보드 복사'를 선택할 수 있는 공유 버튼을 표시한다."""
+    st.markdown("##### 🔗 결과 공유하기")
+    components.html(
+        """
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+                     font-family: 'Source Sans Pro', sans-serif;">
+          <button id="share-link-btn" style="background-color:#4f7942; color:white;
+                  border:none; border-radius:999px; padding:0.5rem 1.3rem;
+                  font-weight:600; cursor:pointer;">🔗 공유 URL 보기</button>
+          <button id="copy-link-btn" style="background-color:#e8f0e3; color:#355e3b;
+                  border:1px solid #cdded2; border-radius:999px; padding:0.5rem 1.3rem;
+                  font-weight:600; cursor:pointer;">📋 클립보드에 복사</button>
+          <span id="share-link-msg" style="font-size:0.85rem; color:#355e3b;"></span>
+        </div>
+        <input id="share-link-box" type="text" readonly
+               style="display:none; width:100%; margin-top:8px; padding:8px;
+                      border-radius:8px; border:1px solid #cdded2; font-size:0.85rem;
+                      box-sizing:border-box;" />
+        <script>
+          const url = window.parent.location.href;
+          const box = document.getElementById('share-link-box');
+          const msg = document.getElementById('share-link-msg');
+          box.value = url;
+
+          document.getElementById('share-link-btn').onclick = () => {
+            box.style.display = (box.style.display === 'none') ? 'block' : 'none';
+            if (box.style.display === 'block') { box.focus(); box.select(); }
+          };
+
+          document.getElementById('copy-link-btn').onclick = () => {
+            const done = () => {
+              msg.textContent = '✅ 링크가 복사되었습니다!';
+              setTimeout(() => { msg.textContent = ''; }, 2500);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(url).then(done).catch(() => {
+                box.style.display = 'block';
+                box.select();
+                document.execCommand('copy');
+                done();
+              });
+            } else {
+              box.style.display = 'block';
+              box.select();
+              document.execCommand('copy');
+              done();
+            }
+          };
+        </script>
+        """,
+        height=80,
+    )
+    st.caption("위 링크를 열면 지금과 동일한 조건의 추천 결과를 다시 볼 수 있어요.")
+
+
+# ══════════════════════════════════════════════════════════
 # 7. 메인 영역
 # ══════════════════════════════════════════════════════════
 include, exclude, _selected_categories = build_conditions()
 
+shared_view = bool(st.query_params) and not submitted
+
 if submitted:
+    _sync_query_params()
+
+if submitted or shared_view:
     if not include and not exclude:
         st.info("위에서 환경 조건을 하나 이상 선택한 뒤 '식물 추천 받기'를 눌러주세요. "
                 "조건을 입력하지 않으면 전체 평균 기준 추천을 보여줍니다.")
     render_results(include, exclude)
+    st.divider()
+    render_share_buttons()
 else:
     st.markdown(
         """
